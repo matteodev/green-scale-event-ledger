@@ -196,4 +196,4 @@ services/semantic-worker/      Schema Zod ed esperimento TypeScript
 4. Verificare il percorso di fallimento fino alla DLQ.
 5. Aggiungere test del worker e controlli automatici prima della demo completa.
 
-Le credenziali e le porte del Compose sono destinate allo sviluppo locale. La proposta iniziale in `green_scale_architecture.md` contiene anche funzionalità future: questo README descrive lo stato implementato. Materiale editoriale e diario personale restano fuori dalla pubblicazione GitHub.
+Le credenziali e le porte del Compose sono destinate allo sviluppo locale. La proposta iniziale in `green_scale_architecture.md` contiene anche funzionalità future: questo README descrive lo stato implementato.

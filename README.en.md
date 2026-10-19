@@ -202,4 +202,4 @@ services/semantic-worker/      Zod schema and TypeScript experiment
 4. Verify the failure path through to the DLQ.
 5. Add worker tests and automated checks before the complete demonstration.
 
-Compose credentials and published ports are intended for local development. The original proposal in `green_scale_architecture.md` includes future features; this README describes the implemented state. Editorial material and the personal development journal are kept out of the GitHub publication.
+Compose credentials and published ports are intended for local development. The original proposal in `green_scale_architecture.md` includes future features; this README describes the implemented state.
