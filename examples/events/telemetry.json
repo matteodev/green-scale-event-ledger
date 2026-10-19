@@ -1,0 +1,14 @@
+{
+  "eventId": "d37c70dd-841a-4fc3-a9f6-0c129e4ab932",
+  "timestamp": "2026-10-19T12:00:00Z",
+  "source": "demo-sensor",
+  "eventType": "telemetry",
+  "meta": {
+    "userId": "demo-user",
+    "ipAddress": "192.0.2.10"
+  },
+  "data": {
+    "sensorId": "sensor-001",
+    "temperatureCelsius": 21.5
+  }
+}

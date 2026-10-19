@@ -1,14 +1,17 @@
 #!/bin/bash
+set -euo pipefail
+
 echo "----------- INIZIALIZZAZIONE CODE AWS SQS (LOCALSTACK) -----------"
 
 # 1. Creiamo la Dead Letter Queue (DLQ).
 # Questa coda raccoglierà i messaggi falliti che non siamo riusciti a elaborare.
-awslocal sqs create-queue --queue-name green-scale-events-dlq --region eu-west-1
+DLQ_URL=$(awslocal sqs create-queue --queue-name green-scale-events-dlq --region eu-west-1 \
+  --query QueueUrl --output text)
 
 # 2. Recuperiamo l'ARN (Amazon Resource Name) della DLQ appena creata.
 # Ci serve l'ARN per poter dire alla coda principale dove spedire i messaggi scartati.
 DLQ_ARN=$(awslocal sqs get-queue-attributes \
-  --queue-url http://localhost:4566/000000000000/green-scale-events-dlq \
+  --queue-url "$DLQ_URL" \
   --attribute-names QueueArn --query "Attributes.QueueArn" --output text --region eu-west-1)
 
 echo "DLQ identificata con ARN: $DLQ_ARN"

@@ -28,5 +28,7 @@ services/semantic-worker/npm-debug.log*
 services/ingestion-gateway/bin/
 services/ingestion-gateway/vendor/
 
-#--- Blog post ---
-blog-posts/*
+# --- Local credentials ---
+.env
+.env.*
+!.env.example
