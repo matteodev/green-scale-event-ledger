@@ -8,7 +8,8 @@ Il percorso previsto è: client → gateway Go → SQS → worker TypeScript →
 
 - Configurazione Docker Compose per LocalStack (SQS), PostgreSQL e Redis.
 - Script di inizializzazione della coda principale e della dead letter queue (DLQ).
-- Gateway e worker ancora da implementare.
+- Gateway Go implementato: `POST /events` → SQS, verificato con LocalStack.
+- Worker e persistenza applicativa ancora da implementare.
 - Nessuna misura di prestazioni o garanzia di produzione ancora verificata.
 
 ## Avvio locale
@@ -35,10 +36,13 @@ Le credenziali presenti nel Compose sono per sviluppo locale. Le porte pubblicat
 
 ## Percorso e documentazione
 
+Per avviare e provare il gateway, segui il [README del servizio](services/ingestion-gateway/README.md).
+
 - [Roadmap](docs/roadmap.md): fasi e criteri di completamento.
 - [Diario tecnico](docs/diario.md): problemi, decisioni e verifiche.
 - [Contratto evento](docs/contratto-evento.md): campi e responsabilità di gateway e worker.
 - [Proposta architetturale](green_scale_architecture.md): ipotesi iniziali, da confrontare con il codice e gli esperimenti.
-- [Articoli](blog-posts/README.md): bozze in italiano per matcode.dev.
+
+Le bozze per matcode.dev sono materiale privato dell'autore, conservato localmente in `blog-posts/` ed escluso da Git e GitHub.
 
 Ogni fase segue questo ciclo: spiegare il concetto, fare una modifica piccola, verificarne il risultato, documentare ciò che abbiamo imparato. Le caratteristiche avanzate verranno aggiunte dopo un primo flusso completo funzionante.

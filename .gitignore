@@ -32,3 +32,6 @@ services/ingestion-gateway/vendor/
 .env
 .env.*
 !.env.example
+
+# --- Bozze private per il blog ---
+/blog-posts/
