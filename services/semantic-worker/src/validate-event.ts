@@ -4,12 +4,16 @@ import { z } from "zod";
 const EventSchema = z.object({
   eventId: z.uuid(),
   timestamp: z.iso.datetime(),
+  eventType: z.enum(["telemetry", "transaction", "audit"]),
+  source: z.string().trim().min(1),
 });
 
 // unknown significa: non sappiamo ancora se possiamo fidarci del dato.
 const input: unknown = {
     eventId: "d37c70dd-841a-4fc3-a9f6-0c129e4ab932",
     timestamp: "2026-10-19T13:00:00Z",
+    eventType: "telemetry",
+    source: "demo-sensor",
 };
 
 const result = EventSchema.safeParse(input);

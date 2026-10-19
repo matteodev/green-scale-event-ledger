@@ -1,13 +1,16 @@
 {
   "name": "semantic-worker",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "type": "module",
+  "description": "Worker che si occupa di validare semanticamente gli eventi",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "tsx src/validate-event.ts",
+    "check": "tsc --noEmit",
+    "build": "tsc",
+    "start": "node dist/validate-event.js"
   },
   "keywords": [],
-  "author": "",
+  "author": "Matteo Papparella",
   "license": "ISC",
   "dependencies": {
     "zod": "^4.6.7"
