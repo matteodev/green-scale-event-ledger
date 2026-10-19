@@ -35,3 +35,4 @@ services/ingestion-gateway/vendor/
 
 # --- Bozze private per il blog ---
 /blog-posts/
+/docs/

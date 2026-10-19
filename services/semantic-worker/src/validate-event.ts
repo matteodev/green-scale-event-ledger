@@ -1,12 +1,4 @@
-import { z } from "zod";
-
-// Descrive le regole da verificare durante l'esecuzione.
-const EventSchema = z.object({
-  eventId: z.uuid(),
-  timestamp: z.iso.datetime(),
-  eventType: z.enum(["telemetry", "transaction", "audit"]),
-  source: z.string().trim().min(1),
-});
+import { EventSchema } from "./event-schema.js";
 
 // unknown significa: non sappiamo ancora se possiamo fidarci del dato.
 const input: unknown = {
@@ -14,6 +6,14 @@ const input: unknown = {
     timestamp: "2026-10-19T13:00:00Z",
     eventType: "telemetry",
     source: "demo-sensor",
+    meta: {
+        userId: "demo-user",
+        ipAddress: "192.0.2.10",
+    },
+    data: {
+        sensorId: "sensor-001",
+        temperatureCelsius: 21.5,
+    },
 };
 
 const result = EventSchema.safeParse(input);
