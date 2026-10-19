@@ -1,0 +1,32 @@
+# --- OS specific ---
+.DS_Store
+.directory
+Thumbs.db
+
+# --- IDEs and Editors ---
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# --- Databases and Docker volumes ---
+# Escludiamo i dati locali dei container per evitare di pushare gigabyte di database su GitHub
+infra/postgres_data/
+infra/redis_data/
+.localstack/
+
+# --- Node / TypeScript (Worker) ---
+services/semantic-worker/node_modules/
+services/semantic-worker/dist/
+services/semantic-worker/npm-debug.log*
+*.tsbuildinfo
+
+# --- Go (Gateway) ---
+services/ingestion-gateway/bin/
+services/ingestion-gateway/vendor/
+
+#--- Blog post ---
+blog-posts/*

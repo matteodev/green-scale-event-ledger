@@ -1,0 +1,54 @@
+version: '3.8'
+
+services:
+  # --- EMULATORE AWS (LOCALSTACK) ---
+  localstack:
+    container_name: green_scale_localstack
+    image: localstack/localstack:latest
+    ports:
+      - "4566:4566"            # Porta standard per tutti i servizi AWS in LocalStack
+    environment:
+      - SERVICES=sqs           # Diciamo a LocalStack di attivare SOLO il modulo SQS per risparmiare RAM
+      - AWS_DEFAULT_REGION=eu-west-1
+    volumes:
+      # Montiamo lo script di inizializzazione. LocalStack esegue automaticamente
+      # tutti gli script .sh presenti in questa cartella interna al momento dell'avvio.
+      - ./init-sqs.sh:/etc/localstack/init/ready.d/init-sqs.sh
+    networks:
+      - green_scale_network
+
+  # --- DATABASE RELAZIONALE + VETTORIALE (POSTGRES + PGVECTOR) ---
+  postgres:
+    container_name: green_scale_postgres
+    image: ankane/pgvector:latest # Immagine ufficiale Postgres ottimizzata con l'estensione pgvector
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres_secure_pass
+      - POSTGRES_DB=green_scale_ledger
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - green_scale_network
+
+  # --- CACHE & DEDUPLICAZIONE (REDIS) ---
+  redis:
+    container_name: green_scale_redis
+    image: redis:7-alpine       # Versione Alpine super leggera
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - green_scale_network
+
+# Definizione dei volumi persistenti per non perdere i dati quando spegniamo i container
+volumes:
+  postgres_data:
+  redis_data:
+
+# Rete isolata per permettere ai container (e futuri servizi) di parlarsi usando i nomi dei servizi
+networks:
+  green_scale_network:
+    driver: bridge
