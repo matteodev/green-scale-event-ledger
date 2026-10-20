@@ -2,7 +2,7 @@
 
 **Un progetto dimostrativo per comprendere e costruire un sistema di elaborazione asincrona degli eventi, un passo alla volta.**
 
-Italiano · [English](README.en.md)
+Italiano · [English](README.en.md) · [Español](README.es.md)
 
 Il progetto collega un gateway HTTP in Go a una coda SQS emulata con LocalStack. Il programma TypeScript legge dalla coda e verifica il contratto degli eventi con Zod. Sono presenti una prima tabella PostgreSQL e una funzione di inserimento verificata separatamente; il collegamento al consumo resta da implementare. Il percorso prosegue con persistenza e idempotenza, interamente in locale: non è richiesto un account AWS.
 

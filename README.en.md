@@ -2,7 +2,7 @@
 
 **A demonstration project for understanding and building asynchronous event processing, one step at a time.**
 
-[Italiano](README.md) · English
+[Italiano](README.md) · English · [Español](README.es.md)
 
 The project connects a Go HTTP gateway to an SQS queue emulated by LocalStack. The TypeScript program consumes messages and validates the event contract with Zod. An initial PostgreSQL table and insert function have been verified independently; integration with consumption is still pending. Persistence and idempotency are the next milestones. Everything runs locally; no AWS account is required.
 
