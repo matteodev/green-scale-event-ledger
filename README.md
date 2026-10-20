@@ -4,7 +4,7 @@
 
 Italiano · [English](README.en.md)
 
-Il progetto collega un gateway HTTP in Go a una coda SQS emulata con LocalStack. Il modulo TypeScript definisce e verifica il contratto degli eventi con Zod. Il percorso prosegue con consumo dei messaggi, persistenza e idempotenza, interamente in locale: non è richiesto un account AWS.
+Il progetto collega un gateway HTTP in Go a una coda SQS emulata con LocalStack. Il programma TypeScript legge dalla coda e verifica il contratto degli eventi con Zod. Sono presenti una prima tabella PostgreSQL e una funzione di inserimento ancora da provare e collegare al consumo. Il percorso prosegue con persistenza e idempotenza, interamente in locale: non è richiesto un account AWS.
 
 ## Stato del progetto
 
@@ -16,20 +16,21 @@ Prima tappa dimostrativa, in sviluppo attivo.
 | Code SQS | Coda principale e DLQ create automaticamente; policy configurata e verificata |
 | Gateway Go | `POST /events` invia il corpo a SQS; test HTTP e prova con LocalStack completati |
 | Contratto TypeScript | Schema Zod riutilizzabile, tipo derivato e programma dimostrativo eseguibile |
-| Consumatore SQS | Da implementare |
-| Persistenza e idempotenza | Da implementare |
+| Consumatore SQS | Singola lettura con long polling, parsing JSON e validazione Zod; verificati evento valido e contratto non conforme |
+| PostgreSQL applicativo | Tabella `events` e connessione verificate; funzione `saveEvent` definita e compilata, primo inserimento ancora da provare |
+| Idempotenza e cancellazione SQS | Da implementare; chiave primaria su `event_id` già presente |
 | Redis applicativo e ricerca vettoriale | Da progettare e implementare |
 
-La presenza dei container PostgreSQL e Redis non implica che siano già collegati al codice applicativo. Non sono ancora disponibili benchmark o una pipeline CI.
+La lettura SQS non è ancora collegata al salvataggio: il consumatore stampa gli esiti e termina senza cancellare messaggi. Redis non è ancora usato dal codice. Non sono ancora disponibili benchmark o una pipeline CI.
 
 ## Architettura
 
-Il gateway e il programma di validazione sono attualmente eseguibili separatamente:
+Il percorso attualmente verificato è:
 
 ```text
-Client HTTP → gateway Go → SQS locale
+Client HTTP → gateway Go → SQS locale → lettura TypeScript → parsing JSON → Zod
 
-Oggetto di esempio → schema Zod → dati validati oppure errori
+TypeScript → query di verifica connessione → PostgreSQL
 ```
 
 Il flusso completo previsto è:
@@ -67,7 +68,8 @@ docker compose -f infra/docker-compose.yaml ps
 Attendere che LocalStack sia pronto, poi verificare le code:
 
 ```bash
-docker compose -f infra/docker-compose.yaml exec -T localstack   awslocal sqs list-queues --region eu-west-1
+docker compose -f infra/docker-compose.yaml exec -T localstack \
+  awslocal sqs list-queues --region eu-west-1
 ```
 
 Devono comparire `green-scale-events-queue` e `green-scale-events-dlq`. Se mancano, consultare i log:
@@ -95,7 +97,9 @@ Il file contiene credenziali fittizie per LocalStack. Il processo legge le varia
 In un secondo terminale, dalla root:
 
 ```bash
-curl -i http://127.0.0.1:8080/events   -H 'Content-Type: application/json'   --data-binary @examples/events/telemetry.json
+curl -i http://127.0.0.1:8080/events \
+  -H 'Content-Type: application/json' \
+  --data-binary @examples/events/telemetry.json
 ```
 
 Risposta attesa, con identificativo variabile:
@@ -119,7 +123,10 @@ Il gateway verifica formato e dimensione del JSON, non il contratto completo: an
 Per leggere un messaggio manualmente, dalla root:
 
 ```bash
-docker compose -f infra/docker-compose.yaml exec -T localstack   awslocal sqs receive-message   --queue-url http://sqs.eu-west-1.localhost.localstack.cloud:4566/000000000000/green-scale-events-queue   --region eu-west-1 --wait-time-seconds 5 --max-number-of-messages 1
+docker compose -f infra/docker-compose.yaml exec -T localstack \
+  awslocal sqs receive-message \
+  --queue-url http://sqs.eu-west-1.localhost.localstack.cloud:4566/000000000000/green-scale-events-queue \
+  --region eu-west-1 --wait-time-seconds 5 --max-number-of-messages 1
 ```
 
 La lettura non cancella il messaggio: lo rende temporaneamente invisibile. Letture ripetute senza cancellazione possono portarlo in DLQ. Se sono presenti più messaggi, quello restituito può provenire da una prova precedente. La policy attuale usa `VisibilityTimeout=30` secondi e `maxReceiveCount=3`.
@@ -136,7 +143,7 @@ npm run build
 npm start
 ```
 
-Il programma valida l'oggetto definito in `src/validate-event.ts` e stampa `Evento valido` con i dati. Non legge ancora da SQS. Per eseguirlo durante lo sviluppo: `npm run dev`.
+Il comando `npm start` esegue ancora l'esperimento isolato: valida l'oggetto definito in `src/validate-event.ts` e stampa `Evento valido` con i dati. Per eseguirlo durante lo sviluppo: `npm run dev`. Il consumo SQS usa il programma separato descritto nel prossimo passo.
 
 Il contratto attuale in `src/event-schema.ts` richiede:
 
@@ -152,7 +159,54 @@ Il contratto attuale in `src/event-schema.ts` richiede:
 
 Zod verifica i dati a runtime; `EventPayload`, ricavato con `z.infer`, serve al controllo statico TypeScript. Il contenuto di `data` non ha ancora regole specifiche per categoria. Identificativo utente e IP sono metadati dichiarati, non una prova d'identità.
 
-### 5. Arrestare l'ambiente
+### 5. Leggere e validare un messaggio SQS
+
+Dalla directory `services/semantic-worker`, caricare la configurazione locale ed eseguire:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/receive-event.js
+```
+
+La build del passo precedente genera anche questo file. Il programma effettua una sola richiesta, attende fino a 20 secondi e riceve al massimo un messaggio. Se il corpo è JSON leggibile e rispetta lo schema, stampa `Evento validato`. Altrimenti distingue corpo assente, JSON non leggibile ed evento non conforme. Una lettura senza messaggi stampa `Nessun messaggio disponibile`.
+
+Per provare la divisione delle responsabilità, inviare `{}` al gateway: la risposta è `202`, mentre il consumatore lo rifiuta per i campi obbligatori mancanti. La coda può restituire un messaggio precedente; il `MessageId` permette di confrontarlo con l'invio HTTP. Non vengono ancora cancellati messaggi, nemmeno quelli validi: letture ripetute possono esaurire i tentativi della policy DLQ. Il trasferimento effettivo in DLQ non è ancora verificato.
+
+### 6. Preparare PostgreSQL e verificarne la connessione
+
+Dalla root, applicare il primo script SQL **una sola volta su un database senza la tabella `events`**:
+
+```bash
+docker compose -f infra/docker-compose.yaml exec -T postgres \
+  psql -U postgres -d green_scale_ledger -v ON_ERROR_STOP=1 \
+  < infra/migrations/001_create_events.sql
+```
+
+Lo script non viene applicato automaticamente da Compose. Non c'è ancora un sistema di gestione delle migrazioni: se la tabella esiste già, saltare il comando di creazione. Per ispezionarla:
+
+```bash
+docker compose -f infra/docker-compose.yaml exec -T postgres \
+  psql -U postgres -d green_scale_ledger -c '\d events'
+```
+
+La tabella contiene `event_id` UUID come chiave primaria, `event_type`, `source`, `occurred_at`, l'intero evento validato in `payload` JSONB e `stored_at` con valore predefinito `NOW()`.
+
+Poi, dalla directory `services/semantic-worker`:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/check-db.js
+```
+
+Il programma esegue una query di sola lettura e stampa `Connessione riuscita` con nome del database e ora del server. Le variabili `PG*` in `.env.example` corrispondono al Compose locale. Il pool usa al massimo cinque connessioni e un timeout di acquisizione/connessione di due secondi.
+
+`src/event-repository.ts` espone `saveEvent(event)` con query parametrizzata: la funzione passa check e build, ma non è ancora stata eseguita per un primo inserimento né collegata a `receive-event.ts`. Un inserimento ripetuto con lo stesso `eventId` produrrebbe un errore di chiave duplicata; distinguere riconsegne identiche e conflitti è il prossimo lavoro.
+
+### 7. Arrestare l'ambiente
 
 Interrompere il gateway con `Ctrl+C`, poi dalla root:
 
@@ -171,7 +225,7 @@ go test -race ./...
 go vet ./...
 ```
 
-Sono stati verificati invio HTTP reale a LocalStack, rifiuto di JSON malformato e risposta `503` verso un endpoint SQS irraggiungibile. I test automatici Go usano un sostituto del client SQS. In TypeScript sono stati eseguiti controllo statico, build e prove manuali su UUID, categorie e campi annidati; non esiste ancora una suite automatizzata del worker.
+Sono stati verificati invio HTTP reale a LocalStack, rifiuto di JSON malformato e risposta `503` verso un endpoint SQS irraggiungibile. I test automatici Go usano un sostituto del client SQS. In TypeScript sono stati eseguiti controllo statico, build, prove manuali dello schema e ricezione da SQS con esiti validi e non conformi. Verificate anche struttura della tabella e connessione PostgreSQL. Il ramo JSON non leggibile attraverso SQS, il primo inserimento e il trasferimento effettivo in DLQ restano da provare; non esiste ancora una suite automatizzata del worker.
 
 Gli esperimenti hanno evidenziato tre distinzioni centrali:
 
@@ -182,17 +236,17 @@ Gli esperimenti hanno evidenziato tre distinzioni centrali:
 ## Struttura
 
 ```text
-infra/                         Compose e inizializzazione SQS
+infra/                         Compose, inizializzazione SQS e primo script SQL
 examples/events/               Evento JSON per provare il gateway
 services/ingestion-gateway/    Gateway Go, configurazione di esempio e test
-services/semantic-worker/      Schema Zod ed esperimento TypeScript
+services/semantic-worker/      Schema, lettura SQS e moduli PostgreSQL
 ```
 
 ## Prossimi passi
 
-1. Leggere da SQS con il worker e applicare lo schema condiviso.
-2. Salvare su PostgreSQL prima di cancellare il messaggio.
-3. Gestire riconsegne identiche e conflitti sullo stesso `eventId`.
+1. Provare il primo inserimento e collegare il salvataggio alla validazione SQS.
+2. Gestire riconsegne identiche e conflitti sullo stesso `eventId`.
+3. Cancellare da SQS soltanto dopo il completamento e introdurre il consumo continuo.
 4. Verificare il percorso di fallimento fino alla DLQ.
 5. Aggiungere test del worker e controlli automatici prima della demo completa.
 

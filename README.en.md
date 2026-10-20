@@ -4,7 +4,7 @@
 
 [Italiano](README.md) · English
 
-The project connects a Go HTTP gateway to an SQS queue emulated by LocalStack. A TypeScript module defines and validates the event contract with Zod. Message consumption, persistence and idempotency are the next milestones. Everything runs locally; no AWS account is required.
+The project connects a Go HTTP gateway to an SQS queue emulated by LocalStack. The TypeScript program consumes messages and validates the event contract with Zod. An initial PostgreSQL table and insert function are present; the first insert and integration with consumption are still pending. Persistence and idempotency are the next milestones. Everything runs locally; no AWS account is required.
 
 ## Project status
 
@@ -16,20 +16,21 @@ An initial demonstration milestone, under active development.
 | SQS queues | Main queue and DLQ provisioned automatically; policy configured and inspected |
 | Go gateway | `POST /events` sends the body to SQS; HTTP tests and a LocalStack integration exercise completed |
 | TypeScript contract | Reusable Zod schema, inferred type and runnable validation example |
-| SQS consumer | Not implemented yet |
-| Persistence and idempotency | Not implemented yet |
+| SQS consumer | Single long-poll request, JSON parsing and Zod validation; valid and nonconforming events verified |
+| Application PostgreSQL access | Table and connection verified; `saveEvent` defined and compiled, first insert still pending |
+| Idempotency and SQS deletion | Not implemented yet; primary key on `event_id` already present |
 | Application use of Redis and vector search | Still to be designed and implemented |
 
-Running PostgreSQL and Redis containers does not mean they are connected to the application yet. Benchmarks and a CI pipeline are not available yet.
+SQS consumption is not yet connected to persistence: the consumer prints results and exits without deleting messages. Redis is not used by the code yet. Benchmarks and a CI pipeline are not available yet.
 
 ## Architecture
 
-The gateway and validation example currently run independently:
+The currently verified flow is:
 
 ```text
-HTTP client → Go gateway → local SQS
+HTTP client → Go gateway → local SQS → TypeScript receive → JSON parsing → Zod
 
-Sample object → Zod schema → validated data or validation errors
+TypeScript → connection verification query → PostgreSQL
 ```
 
 The intended complete flow is:
@@ -142,7 +143,7 @@ npm run build
 npm start
 ```
 
-The program validates the object defined in `src/validate-event.ts` and prints `Evento valido` followed by the data. It does not consume SQS messages yet. Use `npm run dev` to run it during development.
+`npm start` still runs the isolated experiment: it validates the object defined in `src/validate-event.ts` and prints `Evento valido` followed by the data. Use `npm run dev` to run it during development. SQS consumption uses the separate program below.
 
 The current contract in `src/event-schema.ts` requires:
 
@@ -158,7 +159,54 @@ The current contract in `src/event-schema.ts` requires:
 
 Zod validates data at runtime; `EventPayload`, derived using `z.infer`, provides the static TypeScript type. Category-specific rules for the contents of `data` are not implemented yet. User identifiers and IP addresses are declared metadata, not proof of identity.
 
-### 5. Stop the environment
+### 5. Receive and validate an SQS message
+
+From `services/semantic-worker`, load the local configuration and run:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/receive-event.js
+```
+
+The preceding build also generates this file. The program makes one request, waits up to 20 seconds and receives at most one message. If the body is readable JSON matching the schema, it prints `Evento validato`. Otherwise it distinguishes a missing body, malformed JSON and contract violations. If no message is returned, it prints `Nessun messaggio disponibile`.
+
+To exercise the separation of responsibilities, send `{}` to the gateway: HTTP returns `202`, while the consumer rejects it for missing required fields. An earlier message may be returned instead; compare its `MessageId` with the HTTP response. No messages are deleted yet, including valid ones, so repeated receives can exhaust the DLQ policy's receive allowance. Actual transfer to the DLQ has not been verified yet.
+
+### 6. Prepare PostgreSQL and verify connectivity
+
+From the repository root, apply the first SQL script **once to a database without the `events` table**:
+
+```bash
+docker compose -f infra/docker-compose.yaml exec -T postgres \
+  psql -U postgres -d green_scale_ledger -v ON_ERROR_STOP=1 \
+  < infra/migrations/001_create_events.sql
+```
+
+Compose does not apply this script automatically. There is no migration management system yet: skip creation if the table already exists. To inspect it:
+
+```bash
+docker compose -f infra/docker-compose.yaml exec -T postgres \
+  psql -U postgres -d green_scale_ledger -c '\d events'
+```
+
+The table contains the UUID primary key `event_id`, `event_type`, `source`, `occurred_at`, the complete validated event in JSONB `payload`, and `stored_at` with a `NOW()` default.
+
+Then, from `services/semantic-worker`:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/check-db.js
+```
+
+This program runs a read-only query and prints `Connessione riuscita` with the database name and server time. The `PG*` variables in `.env.example` match the local Compose configuration. The pool allows up to five connections with a two-second acquisition/connection timeout.
+
+`src/event-repository.ts` exposes `saveEvent(event)` using a parameterized query. It passes type checking and compilation, but has not been exercised for a first insert or connected to `receive-event.ts` yet. Repeated insertion of the same `eventId` would produce a duplicate-key error; distinguishing identical redeliveries from conflicting events is upcoming work.
+
+### 7. Stop the environment
 
 Stop the gateway with `Ctrl+C`, then run from the repository root:
 
@@ -177,7 +225,7 @@ go test -race ./...
 go vet ./...
 ```
 
-Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation and manual exercises cover UUIDs, event categories and nested fields; there is no automated worker test suite yet.
+Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. Malformed JSON through SQS, the first insert and actual DLQ transfer remain untested; there is no automated worker test suite yet.
 
 The experiments highlight three distinctions:
 
@@ -188,17 +236,17 @@ The experiments highlight three distinctions:
 ## Repository structure
 
 ```text
-infra/                         Compose and SQS initialization
+infra/                         Compose, SQS initialization and first SQL script
 examples/events/               JSON event for exercising the gateway
 services/ingestion-gateway/    Go gateway, example configuration and tests
-services/semantic-worker/      Zod schema and TypeScript experiment
+services/semantic-worker/      Schema, SQS consumption and PostgreSQL modules
 ```
 
 ## Next steps
 
-1. Consume SQS messages and apply the shared schema.
-2. Persist events in PostgreSQL before deleting messages.
-3. Handle identical redeliveries and conflicting payloads sharing an `eventId`.
+1. Exercise the first insert and connect persistence to SQS validation.
+2. Handle identical redeliveries and conflicting payloads sharing an `eventId`.
+3. Delete messages only after completion and introduce continuous consumption.
 4. Verify the failure path through to the DLQ.
 5. Add worker tests and automated checks before the complete demonstration.
 

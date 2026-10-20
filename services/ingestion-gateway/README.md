@@ -24,7 +24,7 @@ curl -i http://127.0.0.1:8080/events \
   --data-binary @examples/events/telemetry.json
 ```
 
-La risposta prevista è `202 Accepted` con un `messageId` di SQS. Il messaggio resta nella coda finché non viene elaborato e cancellato: il worker non è ancora implementato. Non confondere `messageId` con `eventId`.
+La risposta prevista è `202 Accepted` con un `messageId` di SQS. Il messaggio resta nella coda finché non viene elaborato e cancellato: il programma TypeScript legge e valida, ma non salva né cancella ancora i messaggi. Non confondere `messageId` con `eventId`.
 
 Per ispezionare un messaggio, dalla root:
 
@@ -47,7 +47,7 @@ Questa lettura conta come ricezione e rende temporaneamente invisibile il messag
 | Content-Type diverso da `application/json` | `415` |
 | Invio SQS fallito o scaduto | `503` |
 
-La validazione dei campi del contratto sarà nel worker: `{}` viene quindi accettato dal gateway. Il timeout di invio è 2 secondi e include gli eventuali tentativi dell'SDK. Un errore o un timeout non prova che SQS non abbia ricevuto il messaggio: un retry del produttore deve conservare lo stesso `eventId`.
+La validazione dei campi del contratto avviene nel consumatore TypeScript: `{}` viene quindi accettato dal gateway. Il timeout di invio è 2 secondi e include gli eventuali tentativi dell'SDK. Un errore o un timeout non prova che SQS non abbia ricevuto il messaggio: un retry del produttore deve conservare lo stesso `eventId`.
 
 Il server ascolta su loopback per impostazione predefinita. `HTTP_ADDR` permette di cambiarlo. Su `SIGINT` o `SIGTERM` concede fino a 10 secondi alle richieste in corso per terminare.
 
@@ -61,4 +61,4 @@ go build -o bin/gateway .
 
 I test HTTP usano un sostituto di SQS: verificano rifiuto degli input errati senza invio, conservazione del corpo e assenza di falsi `202` quando la dipendenza fallisce. La prova con LocalStack verifica separatamente il collegamento reale.
 
-Questo incremento non include autenticazione, limitazione della concorrenza o misure di throughput. Il worker e il vincolo di idempotenza nel database sono i prossimi passi.
+Questo incremento non include autenticazione, limitazione della concorrenza o misure di throughput. Il consumatore TypeScript legge e valida con Zod; la tabella PostgreSQL ha una chiave primaria su `event_id`. Il collegamento al salvataggio, la gestione dell'idempotenza e la cancellazione da SQS sono i prossimi passi.
