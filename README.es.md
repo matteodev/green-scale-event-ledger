@@ -17,8 +17,8 @@ Primera etapa demostrativa, en desarrollo activo.
 | Gateway Go | `POST /events` envía el cuerpo a SQS; pruebas HTTP y prueba con LocalStack realizadas |
 | Contrato TypeScript | Esquema Zod reutilizable, tipo inferido y ejemplo de validación ejecutable |
 | Consumidor SQS | Una petición con long polling, análisis del JSON y validación Zod; verificados eventos válidos y no conformes |
-| Acceso a PostgreSQL | Tabla, conexión y primera inserción verificadas; duplicado rechazado por la clave primaria |
-| Idempotencia y eliminación en SQS | Pendientes; ya existe una clave primaria sobre `event_id` |
+| Acceso a PostgreSQL | Inserción, entrega repetida idéntica y conflicto de contenido verificados por separado de SQS |
+| Idempotencia y eliminación en SQS | Persistencia idempotente verificada secuencialmente; integración SQS y eliminación pendientes |
 | Uso de Redis y búsqueda vectorial | Pendientes de diseño e implementación |
 
 El consumidor SQS todavía no está conectado a la persistencia: muestra los resultados y termina sin eliminar mensajes. El código aún no utiliza Redis. Todavía no hay pruebas de rendimiento ni un flujo de integración continua.
@@ -204,13 +204,13 @@ node dist/check-db.js
 
 El programa ejecuta una consulta de solo lectura y muestra `Connessione riuscita` con el nombre de la base de datos y la hora del servidor. Las variables `PG*` de `.env.example` coinciden con la configuración local de Compose. El pool permite hasta cinco conexiones y un tiempo máximo de espera de dos segundos para obtener o establecer una conexión.
 
-`src/event-repository.ts` expone `saveEvent(event)` mediante una consulta parametrizada. La primera inserción se ha verificado por separado de SQS con `src/save-example.ts`, que lee, valida y guarda el archivo de ejemplo. Después de compilar y cargar las variables, ejecutar desde el directorio del worker:
+`src/event-repository.ts` expone `saveEvent(event)` mediante consultas parametrizadas: devuelve `inserted` para un evento nuevo, `already_saved` para el mismo ID y contenido, y señala un conflicto si el mismo ID tiene datos distintos, sin sobrescribir el original. `src/save-example.ts` lee y valida el archivo de ejemplo, genera un nuevo UUID y guarda dos veces el mismo evento sintético. Después de compilar y cargar las variables, ejecutar desde el directorio del worker:
 
 ```bash
 node dist/save-example.js
 ```
 
-Este programa modifica la base de datos. Si el evento ya existe, termina con un error de clave duplicada (`23505`). Se ha verificado este comportamiento, confirmando que solo queda una fila. La gestión de las entregas repetidas idénticas y de los conflictos sigue pendiente; `saveEvent` aún no está conectada a `receive-event.ts`.
+Este programa modifica la base de datos: cada ejecución genera un nuevo UUID y puede añadir una fila. Se esperan `Primo salvataggio: inserted` y después `Secondo salvataggio: already_saved`. Las llamadas son secuenciales; se ha verificado una sola fila para el UUID de la prueba. Un experimento anterior con el mismo ID y una temperatura distinta produjo un conflicto sin alterar los datos originales. `saveEvent` aún no está conectada a `receive-event.ts`; no se han probado ejecuciones concurrentes.
 
 ### 7. Detener el entorno
 
@@ -231,12 +231,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal formado y una respuesta `503` al utilizar un endpoint SQS inaccesible. Las pruebas automáticas de Go sustituyen el cliente SQS. En TypeScript se han ejecutado comprobación de tipos, compilación, pruebas manuales del esquema y consumo de eventos válidos y no conformes. También se han comprobado la estructura y la conexión PostgreSQL, la primera inserción y el rechazo de duplicados. Quedan por probar un cuerpo JSON mal formado recibido desde SQS y el traslado efectivo a la DLQ; todavía no hay pruebas automatizadas del worker.
+Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal formado y una respuesta `503` al utilizar un endpoint SQS inaccesible. Las pruebas automáticas de Go sustituyen el cliente SQS. En TypeScript se han ejecutado comprobación de tipos, compilación, pruebas manuales del esquema y consumo de eventos válidos y no conformes. También se han comprobado la estructura y la conexión PostgreSQL, la inserción, el reconocimiento de una entrega idéntica y el rechazo de conflictos sin sobrescritura. Quedan por probar un cuerpo JSON mal formado recibido desde SQS y el traslado efectivo a la DLQ; todavía no hay pruebas automatizadas del worker.
 
 Los experimentos destacan tres diferencias:
 
 - Aceptar un mensaje y procesarlo son operaciones separadas.
-- Recibir un mensaje de SQS no lo elimina: la idempotencia es un requisito del siguiente incremento.
+- Recibir un mensaje de SQS no lo elimina: falta integrar la persistencia idempotente con la gestión de entregas repetidas y la eliminación de mensajes.
 - Un JSON bien formado, los tipos TypeScript y los datos válidos para la aplicación requieren controles diferentes.
 
 ## Estructura del repositorio
@@ -250,8 +250,8 @@ services/semantic-worker/      Esquema, consumo SQS y módulos PostgreSQL
 
 ## Próximos pasos
 
-1. Conectar la persistencia verificada a la validación SQS tras gestionar las entregas repetidas.
-2. Distinguir entregas idénticas y contenidos diferentes con el mismo `eventId`.
+1. Conectar la persistencia verificada a la validación SQS.
+2. Verificar entregas repetidas y conflictos a través de SQS y añadir una prueba concurrente.
 3. Eliminar mensajes solo después de completar el trabajo e introducir el consumo continuo.
 4. Verificar el recorrido de los fallos hasta la DLQ.
 5. Añadir pruebas del worker y comprobaciones automáticas antes de la demostración completa.

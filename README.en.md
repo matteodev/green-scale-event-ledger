@@ -17,8 +17,8 @@ An initial demonstration milestone, under active development.
 | Go gateway | `POST /events` sends the body to SQS; HTTP tests and a LocalStack integration exercise completed |
 | TypeScript contract | Reusable Zod schema, inferred type and runnable validation example |
 | SQS consumer | Single long-poll request, JSON parsing and Zod validation; valid and nonconforming events verified |
-| Application PostgreSQL access | Table, connection and first insert verified; duplicate rejected by the primary key |
-| Idempotency and SQS deletion | Not implemented yet; primary key on `event_id` already present |
+| Application PostgreSQL access | Insert, identical redelivery and conflicting content verified independently from SQS |
+| Idempotency and SQS deletion | Idempotent persistence verified sequentially; SQS integration and deletion still pending |
 | Application use of Redis and vector search | Still to be designed and implemented |
 
 SQS consumption is not yet connected to persistence: the consumer prints results and exits without deleting messages. Redis is not used by the code yet. Benchmarks and a CI pipeline are not available yet.
@@ -204,13 +204,13 @@ node dist/check-db.js
 
 This program runs a read-only query and prints `Connessione riuscita` with the database name and server time. The `PG*` variables in `.env.example` match the local Compose configuration. The pool allows up to five connections with a two-second acquisition/connection timeout.
 
-`src/event-repository.ts` exposes `saveEvent(event)` using a parameterized query. The first insert has been verified independently from SQS through `src/save-example.ts`, which reads, validates and saves the sample file. After building and loading the environment variables, run from the worker directory:
+`src/event-repository.ts` exposes `saveEvent(event)` using parameterized queries: it returns `inserted` for a new event, `already_saved` for an identical ID and payload, and raises a conflict if the same ID has different data, without overwriting the original. `src/save-example.ts` reads and validates the sample file, generates a new UUID and saves the same synthetic event twice. After building and loading the environment variables, run from the worker directory:
 
 ```bash
 node dist/save-example.js
 ```
 
-This program modifies the database. If the sample event already exists, it exits with a duplicate-key error (`23505`). This behavior has been verified, confirming a single database row. Identical redelivery and conflict handling are still pending; `saveEvent` is not connected to `receive-event.ts` yet.
+This program modifies the database: every run generates a new UUID and may add a row. Expected output is `Primo salvataggio: inserted` followed by `Secondo salvataggio: already_saved`. The calls are sequential; a single row was verified for the test UUID. A previous experiment with the same ID and a different temperature raised a conflict while preserving the original data. `saveEvent` is not connected to `receive-event.ts` yet; concurrent executions have not been tested.
 
 ### 7. Stop the environment
 
@@ -231,12 +231,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. The first insert and duplicate rejection have been verified. Malformed JSON through SQS and actual DLQ transfer remain untested; there is no automated worker test suite yet.
+Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. The `inserted` and `already_saved` outcomes and conflict rejection without overwriting have been verified. Malformed JSON through SQS and actual DLQ transfer remain untested; there is no automated worker test suite yet.
 
 The experiments highlight three distinctions:
 
 - Accepting a message and processing it are separate operations.
-- Receiving from SQS does not delete a message; idempotency is a requirement for the next increment.
+- Receiving from SQS does not delete a message; idempotent persistence still needs to be integrated with redelivery handling and message deletion.
 - Well-formed JSON, TypeScript types and valid application data require different checks.
 
 ## Repository structure
@@ -250,8 +250,8 @@ services/semantic-worker/      Schema, SQS consumption and PostgreSQL modules
 
 ## Next steps
 
-1. Connect verified persistence to SQS validation after implementing redelivery handling.
-2. Handle identical redeliveries and conflicting payloads sharing an `eventId`.
+1. Connect verified persistence to SQS validation.
+2. Verify redeliveries and conflicts through SQS and add a concurrent execution test.
 3. Delete messages only after completion and introduce continuous consumption.
 4. Verify the failure path through to the DLQ.
 5. Add worker tests and automated checks before the complete demonstration.
