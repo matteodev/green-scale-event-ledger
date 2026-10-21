@@ -1,6 +1,8 @@
 import { ReceiveMessageCommand } from "@aws-sdk/client-sqs";
 import { sqsClient } from "./sqs-client.js";
 import { EventSchema } from "./event-schema.js";
+import { saveEvent } from "./event-repository.js";
+import { pool } from "./db.js";
 
 const queueUrl = process.env.SQS_QUEUE_URL;
 
@@ -49,11 +51,18 @@ try {
             continue;
         }
 
-        console.log("Evento validato:", result.data);
+        const outcome = await saveEvent(result.data);
+
+        console.log("Evento elaborato:", {
+            messageId: message.MessageId,
+            eventId: result.data.eventId,
+            outcome,
+        });
     }
 } catch (error) {
-    console.error("Lettura da SQS fallita:", error);
+    console.error("Elaborazione del messaggio fallita:", error);
     process.exitCode = 1;
 } finally {
     sqsClient.destroy();
+    await pool.end();
 }
