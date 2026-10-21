@@ -4,7 +4,7 @@
 
 [Italiano](README.md) · [English](README.en.md) · Español
 
-El proyecto conecta una API HTTP en Go con una cola SQS emulada mediante LocalStack. El programa TypeScript lee los mensajes y valida el contrato de los eventos con Zod. Ya se han verificado una primera tabla PostgreSQL y una función de inserción por separado; su integración con el consumidor sigue pendiente. Los siguientes objetivos son completar la persistencia y gestionar la idempotencia. Todo se ejecuta en local, sin necesidad de una cuenta de AWS.
+El proyecto conecta una API HTTP en Go con una cola SQS emulada mediante LocalStack. El consumidor TypeScript valida los eventos con Zod, los guarda en PostgreSQL y solicita la eliminación del mensaje solo tras insertar el evento o reconocer uno idéntico ya guardado. El flujo se ha verificado con pruebas manuales locales; no se necesita una cuenta de AWS.
 
 ## Estado del proyecto
 
@@ -18,19 +18,19 @@ Primera etapa demostrativa, en desarrollo activo.
 | Contrato TypeScript | Esquema Zod reutilizable, tipo inferido y ejemplo de validación ejecutable |
 | Consumidor SQS | Una petición con long polling, análisis del JSON y validación Zod; verificados eventos válidos y no conformes |
 | Acceso a PostgreSQL | Inserción, entrega repetida idéntica y conflicto de contenido verificados por separado de SQS |
-| Idempotencia y eliminación en SQS | Persistencia idempotente verificada secuencialmente; integración SQS y eliminación pendientes |
+| Idempotencia y eliminación en SQS | Inserción y entrega idéntica verificadas con confirmación de eliminación; conflictos probados por separado, concurrencia pendiente |
 | Uso de Redis y búsqueda vectorial | Pendientes de diseño e implementación |
 
-El consumidor SQS todavía no está conectado a la persistencia: muestra los resultados y termina sin eliminar mensajes. El código aún no utiliza Redis. Todavía no hay pruebas de rendimiento ni un flujo de integración continua.
+El consumidor realiza una sola petición de lectura y termina; todavía no es un servicio en escucha continua. El código aún no utiliza Redis. Todavía no hay pruebas de rendimiento ni un flujo de integración continua.
 
 ## Arquitectura
 
 El flujo verificado actualmente es:
 
 ```text
-Cliente HTTP → gateway Go → SQS local → lectura TypeScript → análisis JSON → Zod
-
-TypeScript → consulta de comprobación de conexión → PostgreSQL
+Cliente HTTP → gateway Go → SQS local → TypeScript → Zod → PostgreSQL
+                                                         ↓
+                                         confirmación de eliminación SQS
 ```
 
 El flujo completo previsto es:
@@ -159,22 +159,7 @@ El contrato actual de `src/event-schema.ts` exige:
 
 Zod valida los datos durante la ejecución; `EventPayload`, obtenido mediante `z.infer`, proporciona el tipo estático de TypeScript. Aún no existen reglas específicas por categoría para el contenido de `data`. El identificador de usuario y la dirección IP son metadatos declarados, no una prueba de identidad.
 
-### 5. Leer y validar un mensaje de SQS
-
-Desde `services/semantic-worker`, cargar la configuración local y ejecutar:
-
-```bash
-set -a
-source .env.example
-set +a
-node dist/receive-event.js
-```
-
-La compilación anterior también genera este archivo. El programa realiza una sola petición, espera hasta 20 segundos y recibe como máximo un mensaje. Si el cuerpo es JSON legible y cumple el esquema, muestra `Evento validato`. En caso contrario, distingue entre cuerpo ausente, JSON mal formado e incumplimiento del contrato. Si no se recibe ningún mensaje, muestra `Nessun messaggio disponibile`.
-
-Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza porque faltan campos obligatorios. Puede recibirse antes un mensaje anterior; comparar su `MessageId` con la respuesta HTTP. Todavía no se elimina ningún mensaje, tampoco los válidos, por lo que las lecturas repetidas pueden agotar los intentos permitidos por la política de la DLQ. El traslado efectivo a la DLQ aún no se ha verificado.
-
-### 6. Preparar PostgreSQL y comprobar la conexión
+### 5. Preparar PostgreSQL y comprobar la conexión
 
 Desde la raíz, aplicar el primer script SQL **una sola vez, en una base de datos sin la tabla `events`**:
 
@@ -210,7 +195,24 @@ El programa ejecuta una consulta de solo lectura y muestra `Connessione riuscita
 node dist/save-example.js
 ```
 
-Este programa modifica la base de datos: cada ejecución genera un nuevo UUID y puede añadir una fila. Se esperan `Primo salvataggio: inserted` y después `Secondo salvataggio: already_saved`. Las llamadas son secuenciales; se ha verificado una sola fila para el UUID de la prueba. Un experimento anterior con el mismo ID y una temperatura distinta produjo un conflicto sin alterar los datos originales. `saveEvent` aún no está conectada a `receive-event.ts`; no se han probado ejecuciones concurrentes.
+Este programa modifica la base de datos: cada ejecución genera un nuevo UUID y puede añadir una fila. Se esperan `Primo salvataggio: inserted` y después `Secondo salvataggio: already_saved`. Las llamadas son secuenciales; se ha verificado una sola fila para el UUID de la prueba. Un experimento anterior con el mismo ID y una temperatura distinta produjo un conflicto sin alterar los datos originales. La persistencia ya está conectada a `receive-event.ts`: se han verificado una nueva inserción y el reconocimiento de un evento idéntico guardado, seguidos de confirmación de eliminación. Todavía no se han probado ejecuciones concurrentes.
+
+### 6. Recibir, guardar y completar un mensaje de SQS
+
+Desde `services/semantic-worker`, cargar la configuración local y ejecutar:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/receive-event.js
+```
+
+La compilación TypeScript también genera este archivo. El programa realiza una sola petición, espera hasta 20 segundos y recibe como máximo un mensaje. Tras interpretar el JSON y validarlo, guarda el evento y muestra `Evento elaborato` con MessageId, eventId y resultado `inserted` o `already_saved`. Después envía DeleteMessage con el ReceiptHandle de la recepción actual y muestra `Cancellazione confermata da SQS`. Distingue cuerpo ausente, JSON mal formado e incumplimiento del contrato. Si no recibe mensajes, muestra `Nessun messaggio disponibile`.
+
+Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza por los campos obligatorios ausentes y no lo elimina. Los fallos de persistencia o conflictos interrumpen el flujo antes de DeleteMessage. Si la eliminación falla después de guardar el evento, una entrega repetida puede reconocerse como `already_saved`. Puede recibirse un mensaje anterior; comparar los MessageId. El traslado efectivo a la DLQ y los fallos de persistencia/eliminación siguen pendientes de prueba.
+
+Para probar otro evento, usar `examples/events/telemetry-second.json` en la petición curl del paso 3. El consumidor devuelve `inserted` si el ID es nuevo o `already_saved` si ya está guardado el contenido idéntico; en ambos casos solicita la eliminación del mensaje.
 
 ### 7. Detener el entorno
 
@@ -231,12 +233,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal formado y una respuesta `503` al utilizar un endpoint SQS inaccesible. Las pruebas automáticas de Go sustituyen el cliente SQS. En TypeScript se han ejecutado comprobación de tipos, compilación, pruebas manuales del esquema y consumo de eventos válidos y no conformes. También se han comprobado la estructura y la conexión PostgreSQL, la inserción, el reconocimiento de una entrega idéntica y el rechazo de conflictos sin sobrescritura. Quedan por probar un cuerpo JSON mal formado recibido desde SQS y el traslado efectivo a la DLQ; todavía no hay pruebas automatizadas del worker.
+Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal formado y una respuesta `503` al utilizar un endpoint SQS inaccesible. Las pruebas automáticas de Go sustituyen el cliente SQS. En TypeScript se han ejecutado comprobación de tipos, compilación, pruebas manuales del esquema y consumo de eventos válidos y no conformes. También se han comprobado la estructura y la conexión PostgreSQL. También se han verificado una nueva inserción y `already_saved` a través de SQS, ambos seguidos de confirmación DeleteMessage. El rechazo de conflictos sin sobrescritura se probó por separado del consumo. Quedan por probar un cuerpo JSON mal formado recibido desde SQS y el traslado efectivo a la DLQ; todavía no hay pruebas automatizadas del worker.
 
 Los experimentos destacan tres diferencias:
 
 - Aceptar un mensaje y procesarlo son operaciones separadas.
-- Recibir un mensaje de SQS no lo elimina: falta integrar la persistencia idempotente con la gestión de entregas repetidas y la eliminación de mensajes.
+- Recibir un mensaje de SQS no lo elimina: el consumidor lo elimina solo después de confirmar la persistencia, incluyendo el reconocimiento de un evento idéntico guardado.
 - Un JSON bien formado, los tipos TypeScript y los datos válidos para la aplicación requieren controles diferentes.
 
 ## Estructura del repositorio
@@ -250,10 +252,9 @@ services/semantic-worker/      Esquema, consumo SQS y módulos PostgreSQL
 
 ## Próximos pasos
 
-1. Conectar la persistencia verificada a la validación SQS.
-2. Verificar entregas repetidas y conflictos a través de SQS y añadir una prueba concurrente.
-3. Eliminar mensajes solo después de completar el trabajo e introducir el consumo continuo.
-4. Verificar el recorrido de los fallos hasta la DLQ.
-5. Añadir pruebas del worker y comprobaciones automáticas antes de la demostración completa.
+1. Verificar fallos de persistencia y eliminación, seguidos de una nueva entrega.
+2. Probar conflictos a través de SQS, concurrencia y traslado efectivo a la DLQ.
+3. Introducir consumo continuo y cierre controlado del worker.
+4. Añadir pruebas del worker y comprobaciones automáticas antes de la demostración completa.
 
 Las credenciales y los puertos publicados por Compose están destinados al desarrollo local. La propuesta inicial de `green_scale_architecture.md` incluye funcionalidades futuras; este README describe lo que está implementado.

@@ -4,7 +4,7 @@
 
 Italiano · [English](README.en.md) · [Español](README.es.md)
 
-Il progetto collega un gateway HTTP in Go a una coda SQS emulata con LocalStack. Il programma TypeScript legge dalla coda e verifica il contratto degli eventi con Zod. Sono presenti una prima tabella PostgreSQL e una funzione di inserimento verificata separatamente; il collegamento al consumo resta da implementare. Il percorso prosegue con persistenza e idempotenza, interamente in locale: non è richiesto un account AWS.
+Il progetto collega un gateway HTTP in Go a una coda SQS emulata con LocalStack. Il consumatore TypeScript valida gli eventi con Zod, li salva in PostgreSQL e richiede la cancellazione del messaggio solo dopo inserimento o riconoscimento di un evento identico già salvato. Il flusso è stato verificato con prove manuali locali; non è richiesto un account AWS.
 
 ## Stato del progetto
 
@@ -18,19 +18,19 @@ Prima tappa dimostrativa, in sviluppo attivo.
 | Contratto TypeScript | Schema Zod riutilizzabile, tipo derivato e programma dimostrativo eseguibile |
 | Consumatore SQS | Singola lettura con long polling, parsing JSON e validazione Zod; verificati evento valido e contratto non conforme |
 | PostgreSQL applicativo | Inserimento, riconsegna identica e conflitto di contenuto verificati separatamente da SQS |
-| Idempotenza e cancellazione SQS | Salvataggio idempotente per prove sequenziali; integrazione SQS e cancellazione ancora da implementare |
+| Idempotenza e cancellazione SQS | Verificati nuovo inserimento e riconsegna identica con conferma di cancellazione; conflitto verificato separatamente, prove concorrenti ancora da eseguire |
 | Redis applicativo e ricerca vettoriale | Da progettare e implementare |
 
-La lettura SQS non è ancora collegata al salvataggio: il consumatore stampa gli esiti e termina senza cancellare messaggi. Redis non è ancora usato dal codice. Non sono ancora disponibili benchmark o una pipeline CI.
+Il consumatore effettua una singola richiesta di lettura e poi termina: non è ancora un servizio in ascolto continuo. Redis non è ancora usato dal codice. Non sono ancora disponibili benchmark o una pipeline CI.
 
 ## Architettura
 
 Il percorso attualmente verificato è:
 
 ```text
-Client HTTP → gateway Go → SQS locale → lettura TypeScript → parsing JSON → Zod
-
-TypeScript → query di verifica connessione → PostgreSQL
+Client HTTP → gateway Go → SQS locale → TypeScript → Zod → PostgreSQL
+                                                        ↓
+                                        conferma di cancellazione SQS
 ```
 
 Il flusso completo previsto è:
@@ -159,22 +159,7 @@ Il contratto attuale in `src/event-schema.ts` richiede:
 
 Zod verifica i dati a runtime; `EventPayload`, ricavato con `z.infer`, serve al controllo statico TypeScript. Il contenuto di `data` non ha ancora regole specifiche per categoria. Identificativo utente e IP sono metadati dichiarati, non una prova d'identità.
 
-### 5. Leggere e validare un messaggio SQS
-
-Dalla directory `services/semantic-worker`, caricare la configurazione locale ed eseguire:
-
-```bash
-set -a
-source .env.example
-set +a
-node dist/receive-event.js
-```
-
-La build del passo precedente genera anche questo file. Il programma effettua una sola richiesta, attende fino a 20 secondi e riceve al massimo un messaggio. Se il corpo è JSON leggibile e rispetta lo schema, stampa `Evento validato`. Altrimenti distingue corpo assente, JSON non leggibile ed evento non conforme. Una lettura senza messaggi stampa `Nessun messaggio disponibile`.
-
-Per provare la divisione delle responsabilità, inviare `{}` al gateway: la risposta è `202`, mentre il consumatore lo rifiuta per i campi obbligatori mancanti. La coda può restituire un messaggio precedente; il `MessageId` permette di confrontarlo con l'invio HTTP. Non vengono ancora cancellati messaggi, nemmeno quelli validi: letture ripetute possono esaurire i tentativi della policy DLQ. Il trasferimento effettivo in DLQ non è ancora verificato.
-
-### 6. Preparare PostgreSQL e verificarne la connessione
+### 5. Preparare PostgreSQL e verificarne la connessione
 
 Dalla root, applicare il primo script SQL **una sola volta su un database senza la tabella `events`**:
 
@@ -210,7 +195,24 @@ Il programma esegue una query di sola lettura e stampa `Connessione riuscita` co
 node dist/save-example.js
 ```
 
-Il programma modifica il database: ogni avvio genera un nuovo UUID e può aggiungere una riga. Ci aspettiamo `Primo salvataggio: inserted` e `Secondo salvataggio: already_saved`. Le due chiamate sono sequenziali; è stata verificata una sola riga per l'UUID della prova. In un esperimento precedente, stesso ID e temperatura diversa hanno prodotto un conflitto mantenendo il contenuto originale. `saveEvent` non è ancora collegata a `receive-event.ts`; non sono ancora state provate esecuzioni concorrenti.
+Il programma modifica il database: ogni avvio genera un nuovo UUID e può aggiungere una riga. Ci aspettiamo `Primo salvataggio: inserted` e `Secondo salvataggio: already_saved`. Le due chiamate sono sequenziali; è stata verificata una sola riga per l'UUID della prova. In un esperimento precedente, stesso ID e temperatura diversa hanno prodotto un conflitto mantenendo il contenuto originale. Il salvataggio è ora collegato a `receive-event.ts`: confermati nuovo inserimento e riconoscimento di un evento già salvato, seguiti dalla conferma di cancellazione. Non sono ancora state provate esecuzioni concorrenti.
+
+### 6. Ricevere, salvare e completare un messaggio SQS
+
+Dalla directory `services/semantic-worker`, caricare la configurazione locale ed eseguire:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/receive-event.js
+```
+
+La build TypeScript genera anche questo file. Il programma effettua una sola richiesta, attende fino a 20 secondi e riceve al massimo un messaggio. Dopo parsing e validazione, salva l'evento e stampa `Evento elaborato` con MessageId, eventId ed esito `inserted` o `already_saved`. Poi invia DeleteMessage usando il ReceiptHandle della ricezione corrente e stampa `Cancellazione confermata da SQS`. Distingue corpo assente, JSON non leggibile e contratto non conforme. Una lettura senza risultati stampa `Nessun messaggio disponibile`.
+
+Per provare la divisione delle responsabilità, inviare `{}` al gateway: la risposta è `202`, mentre il consumatore lo rifiuta per i campi obbligatori mancanti, senza cancellarlo. Errori di persistenza o conflitti interrompono il percorso prima di DeleteMessage. Se fallisce la cancellazione dopo il salvataggio, una riconsegna può essere riconosciuta come `already_saved`. La coda può restituire un messaggio precedente: confrontare i MessageId. Il trasferimento effettivo in DLQ e i guasti di persistenza/cancellazione restano da verificare.
+
+Per provare un evento diverso, usare `examples/events/telemetry-second.json` nella richiesta curl del passo 3. Il consumatore restituisce `inserted` se quell'ID non è ancora presente oppure `already_saved` se il contenuto identico è già salvato; in entrambi i casi richiede la cancellazione del messaggio.
 
 ### 7. Arrestare l'ambiente
 
@@ -231,12 +233,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Sono stati verificati invio HTTP reale a LocalStack, rifiuto di JSON malformato e risposta `503` verso un endpoint SQS irraggiungibile. I test automatici Go usano un sostituto del client SQS. In TypeScript sono stati eseguiti controllo statico, build, prove manuali dello schema e ricezione da SQS con esiti validi e non conformi. Verificate anche struttura della tabella e connessione PostgreSQL. Verificati anche `inserted`, `already_saved` e il rifiuto del conflitto senza sovrascrittura. Il ramo JSON non leggibile attraverso SQS e il trasferimento effettivo in DLQ restano da provare; non esiste ancora una suite automatizzata del worker.
+Sono stati verificati invio HTTP reale a LocalStack, rifiuto di JSON malformato e risposta `503` verso un endpoint SQS irraggiungibile. I test automatici Go usano un sostituto del client SQS. In TypeScript sono stati eseguiti controllo statico, build, prove manuali dello schema e ricezione da SQS con esiti validi e non conformi. Verificate anche struttura della tabella e connessione PostgreSQL. Verificati anche nuovo inserimento e `already_saved` attraverso SQS, entrambi seguiti da conferma DeleteMessage. Il conflitto senza sovrascrittura è stato provato separatamente dal consumo. Il ramo JSON non leggibile attraverso SQS e il trasferimento effettivo in DLQ restano da provare; non esiste ancora una suite automatizzata del worker.
 
 Gli esperimenti hanno evidenziato tre distinzioni centrali:
 
 - Accettare un messaggio ed elaborarlo sono operazioni separate.
-- Ricevere da SQS non cancella il messaggio: il salvataggio idempotente deve ancora essere collegato alla gestione delle riconsegne e alla cancellazione.
+- Ricevere da SQS non cancella il messaggio: il consumatore lo elimina solo dopo persistenza confermata, gestendo anche gli eventi identici già salvati.
 - JSON ben formato, tipi TypeScript e dati applicativi validi sono controlli differenti.
 
 ## Struttura
@@ -250,10 +252,9 @@ services/semantic-worker/      Schema, lettura SQS e moduli PostgreSQL
 
 ## Prossimi passi
 
-1. Collegare il salvataggio verificato alla validazione SQS.
-2. Verificare riconsegne e conflitti attraverso SQS e aggiungere una prova concorrente.
-3. Cancellare da SQS soltanto dopo il completamento e introdurre il consumo continuo.
-4. Verificare il percorso di fallimento fino alla DLQ.
-5. Aggiungere test del worker e controlli automatici prima della demo completa.
+1. Verificare guasti di persistenza e cancellazione, con successiva riconsegna.
+2. Provare conflitti attraverso SQS, concorrenza e trasferimento effettivo in DLQ.
+3. Introdurre consumo continuo e arresto controllato del worker.
+4. Aggiungere test del worker e controlli automatici prima della demo completa.
 
 Le credenziali e le porte del Compose sono destinate allo sviluppo locale. La proposta iniziale in `green_scale_architecture.md` contiene anche funzionalità future: questo README descrive lo stato implementato.

@@ -4,7 +4,7 @@
 
 [Italiano](README.md) · English · [Español](README.es.md)
 
-The project connects a Go HTTP gateway to an SQS queue emulated by LocalStack. The TypeScript program consumes messages and validates the event contract with Zod. An initial PostgreSQL table and insert function have been verified independently; integration with consumption is still pending. Persistence and idempotency are the next milestones. Everything runs locally; no AWS account is required.
+The project connects a Go HTTP gateway to an SQS queue emulated by LocalStack. The TypeScript consumer validates events with Zod, persists them in PostgreSQL and requests message deletion only after insertion or recognition of an identical stored event. The flow has been verified through manual local exercises; no AWS account is required.
 
 ## Project status
 
@@ -18,19 +18,19 @@ An initial demonstration milestone, under active development.
 | TypeScript contract | Reusable Zod schema, inferred type and runnable validation example |
 | SQS consumer | Single long-poll request, JSON parsing and Zod validation; valid and nonconforming events verified |
 | Application PostgreSQL access | Insert, identical redelivery and conflicting content verified independently from SQS |
-| Idempotency and SQS deletion | Idempotent persistence verified sequentially; SQS integration and deletion still pending |
+| Idempotency and SQS deletion | New insertion and identical redelivery verified with deletion acknowledgement; conflicts tested separately, concurrency still untested |
 | Application use of Redis and vector search | Still to be designed and implemented |
 
-SQS consumption is not yet connected to persistence: the consumer prints results and exits without deleting messages. Redis is not used by the code yet. Benchmarks and a CI pipeline are not available yet.
+The consumer makes one receive request and then exits; it is not a continuously running service yet. Redis is not used by the code yet. Benchmarks and a CI pipeline are not available yet.
 
 ## Architecture
 
 The currently verified flow is:
 
 ```text
-HTTP client → Go gateway → local SQS → TypeScript receive → JSON parsing → Zod
-
-TypeScript → connection verification query → PostgreSQL
+HTTP client → Go gateway → local SQS → TypeScript → Zod → PostgreSQL
+                                                        ↓
+                                        SQS deletion acknowledgement
 ```
 
 The intended complete flow is:
@@ -159,22 +159,7 @@ The current contract in `src/event-schema.ts` requires:
 
 Zod validates data at runtime; `EventPayload`, derived using `z.infer`, provides the static TypeScript type. Category-specific rules for the contents of `data` are not implemented yet. User identifiers and IP addresses are declared metadata, not proof of identity.
 
-### 5. Receive and validate an SQS message
-
-From `services/semantic-worker`, load the local configuration and run:
-
-```bash
-set -a
-source .env.example
-set +a
-node dist/receive-event.js
-```
-
-The preceding build also generates this file. The program makes one request, waits up to 20 seconds and receives at most one message. If the body is readable JSON matching the schema, it prints `Evento validato`. Otherwise it distinguishes a missing body, malformed JSON and contract violations. If no message is returned, it prints `Nessun messaggio disponibile`.
-
-To exercise the separation of responsibilities, send `{}` to the gateway: HTTP returns `202`, while the consumer rejects it for missing required fields. An earlier message may be returned instead; compare its `MessageId` with the HTTP response. No messages are deleted yet, including valid ones, so repeated receives can exhaust the DLQ policy's receive allowance. Actual transfer to the DLQ has not been verified yet.
-
-### 6. Prepare PostgreSQL and verify connectivity
+### 5. Prepare PostgreSQL and verify connectivity
 
 From the repository root, apply the first SQL script **once to a database without the `events` table**:
 
@@ -210,7 +195,24 @@ This program runs a read-only query and prints `Connessione riuscita` with the d
 node dist/save-example.js
 ```
 
-This program modifies the database: every run generates a new UUID and may add a row. Expected output is `Primo salvataggio: inserted` followed by `Secondo salvataggio: already_saved`. The calls are sequential; a single row was verified for the test UUID. A previous experiment with the same ID and a different temperature raised a conflict while preserving the original data. `saveEvent` is not connected to `receive-event.ts` yet; concurrent executions have not been tested.
+This program modifies the database: every run generates a new UUID and may add a row. Expected output is `Primo salvataggio: inserted` followed by `Secondo salvataggio: already_saved`. The calls are sequential; a single row was verified for the test UUID. A previous experiment with the same ID and a different temperature raised a conflict while preserving the original data. Persistence is now connected to `receive-event.ts`: new insertion and recognition of an identical stored event have been verified, followed by deletion acknowledgement. Concurrent executions have not been tested yet.
+
+### 6. Receive, persist and complete an SQS message
+
+From `services/semantic-worker`, load the local configuration and run:
+
+```bash
+set -a
+source .env.example
+set +a
+node dist/receive-event.js
+```
+
+The TypeScript build also generates this file. The program makes one request, waits up to 20 seconds and receives at most one message. After parsing and validation, it saves the event and prints `Evento elaborato` with MessageId, eventId and outcome `inserted` or `already_saved`. It then sends DeleteMessage using the current receipt handle and prints `Cancellazione confermata da SQS`. It distinguishes a missing body, malformed JSON and contract violations. An empty receive prints `Nessun messaggio disponibile`.
+
+To exercise the separation of responsibilities, send `{}` to the gateway: HTTP returns `202`, while the consumer rejects it for missing required fields without deleting it. Persistence failures or conflicts interrupt the flow before DeleteMessage. If deletion fails after persistence, redelivery can be recognized as `already_saved`. An earlier message may be returned; compare MessageIds. Actual DLQ transfer and persistence/deletion failure scenarios remain untested.
+
+To try a different event, use `examples/events/telemetry-second.json` in the curl request from step 3. The consumer returns `inserted` if the ID is new or `already_saved` if identical data is stored; in both cases it requests message deletion.
 
 ### 7. Stop the environment
 
@@ -231,12 +233,12 @@ go test -race ./...
 go vet ./...
 ```
 
-Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. The `inserted` and `already_saved` outcomes and conflict rejection without overwriting have been verified. Malformed JSON through SQS and actual DLQ transfer remain untested; there is no automated worker test suite yet.
+Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. New insertion and `already_saved` have also been verified through SQS, both followed by DeleteMessage acknowledgement. Conflict rejection without overwriting was tested independently from consumption. Malformed JSON through SQS and actual DLQ transfer remain untested; there is no automated worker test suite yet.
 
 The experiments highlight three distinctions:
 
 - Accepting a message and processing it are separate operations.
-- Receiving from SQS does not delete a message; idempotent persistence still needs to be integrated with redelivery handling and message deletion.
+- Receiving from SQS does not delete a message; the consumer deletes it only after confirmed persistence, including recognition of an identical stored event.
 - Well-formed JSON, TypeScript types and valid application data require different checks.
 
 ## Repository structure
@@ -250,10 +252,9 @@ services/semantic-worker/      Schema, SQS consumption and PostgreSQL modules
 
 ## Next steps
 
-1. Connect verified persistence to SQS validation.
-2. Verify redeliveries and conflicts through SQS and add a concurrent execution test.
-3. Delete messages only after completion and introduce continuous consumption.
-4. Verify the failure path through to the DLQ.
-5. Add worker tests and automated checks before the complete demonstration.
+1. Verify persistence and deletion failures, followed by redelivery.
+2. Exercise conflicts through SQS, concurrency and actual DLQ transfer.
+3. Introduce continuous consumption and graceful worker shutdown.
+4. Add worker tests and automated checks before the complete demonstration.
 
 Compose credentials and published ports are intended for local development. The original proposal in `green_scale_architecture.md` includes future features; this README describes the implemented state.
