@@ -20,8 +20,21 @@ try {
         process.exitCode = 1;
     } else {
         // Attendiamo il completamento dell'INSERT prima di stampare successo.
-        const outcome = await saveEvent(result.data);
-        console.log("Esito salvataggio:", outcome, result.data.eventId);
+        //const outcome = await saveEvent(result.data);
+        //console.log("Esito salvataggio:", outcome, result.data.eventId);
+
+        // Copiamo l'evento validato, cambiando solo la temperatura.
+        // eventId rimane quello dell'evento già salvato.
+        const conflictingEvent = {
+            ...result.data,
+            data: {
+                ...result.data.data,
+                temperatureCelsius: 99,
+            },
+        };
+
+        const outcome = await saveEvent(conflictingEvent);
+        console.log("Esito salvataggio:", outcome, conflictingEvent.eventId);
     }
 } catch (error) {
     console.error("Salvataggio fallito:", error);
