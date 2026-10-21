@@ -20,8 +20,8 @@ try {
         process.exitCode = 1;
     } else {
         // Attendiamo il completamento dell'INSERT prima di stampare successo.
-        await saveEvent(result.data);
-        console.log("Evento salvato:", result.data.eventId);
+        const outcome = await saveEvent(result.data);
+        console.log("Esito salvataggio:", outcome, result.data.eventId);
     }
 } catch (error) {
     console.error("Salvataggio fallito:", error);
