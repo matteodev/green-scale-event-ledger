@@ -210,7 +210,7 @@ node dist/receive-event.js
 
 La compilación TypeScript también genera este archivo. El programa realiza una sola petición, espera hasta 20 segundos y recibe como máximo un mensaje. Tras interpretar el JSON y validarlo, guarda el evento y muestra `Evento elaborato` con MessageId, eventId y resultado `inserted` o `already_saved`. Después envía DeleteMessage con el ReceiptHandle de la recepción actual y muestra `Cancellazione confermata da SQS`. Distingue cuerpo ausente, JSON mal formado e incumplimiento del contrato. Si no recibe mensajes, muestra `Nessun messaggio disponibile`.
 
-Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza por los campos obligatorios ausentes y no lo elimina. Los fallos de persistencia o conflictos interrumpen el flujo antes de DeleteMessage. Si la eliminación falla después de guardar el evento, una entrega repetida puede reconocerse como `already_saved`. Puede recibirse un mensaje anterior; comparar los MessageId. El traslado efectivo a la DLQ y los fallos de persistencia/eliminación siguen pendientes de prueba.
+Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza por los campos obligatorios ausentes y no lo elimina. Los fallos de persistencia o conflictos interrumpen el flujo antes de DeleteMessage. Si la eliminación falla después de guardar el evento, una entrega repetida puede reconocerse como `already_saved`. Puede recibirse un mensaje anterior; comparar los MessageId. Se ha verificado la recuperación tras una conexión PostgreSQL rechazada antes de guardar el evento. El traslado efectivo a la DLQ y los fallos posteriores a la persistencia siguen pendientes.
 
 Para probar otro evento, usar `examples/events/telemetry-second.json` en la petición curl del paso 3. El consumidor devuelve `inserted` si el ID es nuevo o `already_saved` si ya está guardado el contenido idéntico; en ambos casos solicita la eliminación del mensaje.
 
@@ -235,6 +235,8 @@ go vet ./...
 
 Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal formado y una respuesta `503` al utilizar un endpoint SQS inaccesible. Las pruebas automáticas de Go sustituyen el cliente SQS. En TypeScript se han ejecutado comprobación de tipos, compilación, pruebas manuales del esquema y consumo de eventos válidos y no conformes. También se han comprobado la estructura y la conexión PostgreSQL. También se han verificado una nueva inserción y `already_saved` a través de SQS, ambos seguidos de confirmación DeleteMessage. El rechazo de conflictos sin sobrescritura se probó por separado del consumo. Quedan por probar un cuerpo JSON mal formado recibido desde SQS y el traslado efectivo a la DLQ; todavía no hay pruebas automatizadas del worker.
 
+Una prueba manual con `examples/events/telemetry-db-retry.json` verificó el fallo antes de guardar: al ejecutar el consumidor con `PGPORT=1`, se rechazó la conexión y no se creó la nueva fila. Después del tiempo de invisibilidad, otra ejecución con el puerto correcto recibió el mismo MessageId, insertó el evento y obtuvo la confirmación de eliminación. El segundo intento se inició manualmente, sin otro envío HTTP. El puerto erróneo solo afectaba a ese proceso; PostgreSQL no se detuvo. La prueba no cubre la pérdida de una respuesta de commit ni un fallo de DeleteMessage. El ejemplo ya se guardó en la prueba original: al reutilizarlo en la misma base de datos, la recuperación puede devolver `already_saved`.
+
 Los experimentos destacan tres diferencias:
 
 - Aceptar un mensaje y procesarlo son operaciones separadas.
@@ -252,7 +254,7 @@ services/semantic-worker/      Esquema, consumo SQS y módulos PostgreSQL
 
 ## Próximos pasos
 
-1. Verificar fallos de persistencia y eliminación, seguidos de una nueva entrega.
+1. Verificar un fallo después de guardar y antes de eliminar el mensaje, seguido de una nueva entrega.
 2. Probar conflictos a través de SQS, concurrencia y traslado efectivo a la DLQ.
 3. Introducir consumo continuo y cierre controlado del worker.
 4. Añadir pruebas del worker y comprobaciones automáticas antes de la demostración completa.

@@ -210,7 +210,7 @@ node dist/receive-event.js
 
 The TypeScript build also generates this file. The program makes one request, waits up to 20 seconds and receives at most one message. After parsing and validation, it saves the event and prints `Evento elaborato` with MessageId, eventId and outcome `inserted` or `already_saved`. It then sends DeleteMessage using the current receipt handle and prints `Cancellazione confermata da SQS`. It distinguishes a missing body, malformed JSON and contract violations. An empty receive prints `Nessun messaggio disponibile`.
 
-To exercise the separation of responsibilities, send `{}` to the gateway: HTTP returns `202`, while the consumer rejects it for missing required fields without deleting it. Persistence failures or conflicts interrupt the flow before DeleteMessage. If deletion fails after persistence, redelivery can be recognized as `already_saved`. An earlier message may be returned; compare MessageIds. Actual DLQ transfer and persistence/deletion failure scenarios remain untested.
+To exercise the separation of responsibilities, send `{}` to the gateway: HTTP returns `202`, while the consumer rejects it for missing required fields without deleting it. Persistence failures or conflicts interrupt the flow before DeleteMessage. If deletion fails after persistence, redelivery can be recognized as `already_saved`. An earlier message may be returned; compare MessageIds. Recovery from a refused PostgreSQL connection before persistence has been verified. Actual DLQ transfer and failures after persistence remain untested.
 
 To try a different event, use `examples/events/telemetry-second.json` in the curl request from step 3. The consumer returns `inserted` if the ID is new or `already_saved` if identical data is stored; in both cases it requests message deletion.
 
@@ -235,6 +235,8 @@ go vet ./...
 
 Verified exercises include a real HTTP send to LocalStack, rejection of malformed JSON and a `503` response when targeting an unreachable SQS endpoint. Automated Go tests use a substitute SQS client. TypeScript checks, compilation, manual schema exercises and SQS consumption of valid and nonconforming events have been verified. PostgreSQL table structure and connectivity have also been checked. New insertion and `already_saved` have also been verified through SQS, both followed by DeleteMessage acknowledgement. Conflict rejection without overwriting was tested independently from consumption. Malformed JSON through SQS and actual DLQ transfer remain untested; there is no automated worker test suite yet.
 
+A manual exercise using `examples/events/telemetry-db-retry.json` verified failure before persistence: running the consumer with `PGPORT=1` produced a refused connection and no new database row. After the visibility timeout, another run using the correct port received the same MessageId, inserted the event and obtained deletion acknowledgement. The second attempt was started manually, without another HTTP send. The incorrect port applied to that process only; PostgreSQL was not stopped. This does not cover a lost commit response or a failed DeleteMessage request. The sample was persisted in the original exercise: reusing it against the same database may produce `already_saved` on recovery.
+
 The experiments highlight three distinctions:
 
 - Accepting a message and processing it are separate operations.
@@ -252,7 +254,7 @@ services/semantic-worker/      Schema, SQS consumption and PostgreSQL modules
 
 ## Next steps
 
-1. Verify persistence and deletion failures, followed by redelivery.
+1. Verify failure after persistence and before deletion, followed by redelivery.
 2. Exercise conflicts through SQS, concurrency and actual DLQ transfer.
 3. Introduce continuous consumption and graceful worker shutdown.
 4. Add worker tests and automated checks before the complete demonstration.

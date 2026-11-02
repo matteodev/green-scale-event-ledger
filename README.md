@@ -210,7 +210,7 @@ node dist/receive-event.js
 
 La build TypeScript genera anche questo file. Il programma effettua una sola richiesta, attende fino a 20 secondi e riceve al massimo un messaggio. Dopo parsing e validazione, salva l'evento e stampa `Evento elaborato` con MessageId, eventId ed esito `inserted` o `already_saved`. Poi invia DeleteMessage usando il ReceiptHandle della ricezione corrente e stampa `Cancellazione confermata da SQS`. Distingue corpo assente, JSON non leggibile e contratto non conforme. Una lettura senza risultati stampa `Nessun messaggio disponibile`.
 
-Per provare la divisione delle responsabilità, inviare `{}` al gateway: la risposta è `202`, mentre il consumatore lo rifiuta per i campi obbligatori mancanti, senza cancellarlo. Errori di persistenza o conflitti interrompono il percorso prima di DeleteMessage. Se fallisce la cancellazione dopo il salvataggio, una riconsegna può essere riconosciuta come `already_saved`. La coda può restituire un messaggio precedente: confrontare i MessageId. Il trasferimento effettivo in DLQ e i guasti di persistenza/cancellazione restano da verificare.
+Per provare la divisione delle responsabilità, inviare `{}` al gateway: la risposta è `202`, mentre il consumatore lo rifiuta per i campi obbligatori mancanti, senza cancellarlo. Errori di persistenza o conflitti interrompono il percorso prima di DeleteMessage. Se fallisce la cancellazione dopo il salvataggio, una riconsegna può essere riconosciuta come `already_saved`. La coda può restituire un messaggio precedente: confrontare i MessageId. Verificato il recupero da connessione PostgreSQL rifiutata prima della persistenza. Il trasferimento effettivo in DLQ e i guasti dopo il salvataggio restano da provare.
 
 Per provare un evento diverso, usare `examples/events/telemetry-second.json` nella richiesta curl del passo 3. Il consumatore restituisce `inserted` se quell'ID non è ancora presente oppure `already_saved` se il contenuto identico è già salvato; in entrambi i casi richiede la cancellazione del messaggio.
 
@@ -235,6 +235,8 @@ go vet ./...
 
 Sono stati verificati invio HTTP reale a LocalStack, rifiuto di JSON malformato e risposta `503` verso un endpoint SQS irraggiungibile. I test automatici Go usano un sostituto del client SQS. In TypeScript sono stati eseguiti controllo statico, build, prove manuali dello schema e ricezione da SQS con esiti validi e non conformi. Verificate anche struttura della tabella e connessione PostgreSQL. Verificati anche nuovo inserimento e `already_saved` attraverso SQS, entrambi seguiti da conferma DeleteMessage. Il conflitto senza sovrascrittura è stato provato separatamente dal consumo. Il ramo JSON non leggibile attraverso SQS e il trasferimento effettivo in DLQ restano da provare; non esiste ancora una suite automatizzata del worker.
 
+Una prova manuale con `examples/events/telemetry-db-retry.json` ha verificato il guasto prima della persistenza: eseguendo il consumatore con `PGPORT=1`, la connessione è stata rifiutata e il database è rimasto senza la nuova riga. Dopo il visibility timeout, una nuova esecuzione con la porta corretta ha ricevuto lo stesso MessageId, inserito l'evento e ottenuto conferma della cancellazione. Il secondo tentativo è stato avviato manualmente, senza nuovo invio HTTP. La porta errata valeva solo per quel processo: PostgreSQL non è stato spento. La prova non copre perdita della risposta di commit o fallimento di DeleteMessage. Il file è già stato salvato nella prova iniziale: riutilizzandolo sullo stesso database, il recupero potrà restituire `already_saved`.
+
 Gli esperimenti hanno evidenziato tre distinzioni centrali:
 
 - Accettare un messaggio ed elaborarlo sono operazioni separate.
@@ -252,7 +254,7 @@ services/semantic-worker/      Schema, lettura SQS e moduli PostgreSQL
 
 ## Prossimi passi
 
-1. Verificare guasti di persistenza e cancellazione, con successiva riconsegna.
+1. Verificare un guasto dopo la persistenza e prima della cancellazione, con successiva riconsegna.
 2. Provare conflitti attraverso SQS, concorrenza e trasferimento effettivo in DLQ.
 3. Introdurre consumo continuo e arresto controllato del worker.
 4. Aggiungere test del worker e controlli automatici prima della demo completa.
