@@ -17,7 +17,7 @@ Primera etapa demostrativa, en desarrollo activo.
 | Gateway Go | `POST /events` envía el cuerpo a SQS; pruebas HTTP y prueba con LocalStack realizadas |
 | Contrato TypeScript | Esquema Zod reutilizable, tipo inferido y ejemplo de validación ejecutable |
 | Consumidor SQS | Una petición con long polling, análisis del JSON y validación Zod; verificados eventos válidos y no conformes |
-| Acceso a PostgreSQL | Inserción, entrega repetida idéntica y conflicto de contenido verificados por separado de SQS |
+| Acceso a PostgreSQL | Inserción y entrega idéntica verificadas también a través de SQS; conflicto de contenido verificado por separado |
 | Idempotencia y eliminación en SQS | Inserción y entrega idéntica verificadas con confirmación de eliminación; conflictos probados por separado, concurrencia pendiente |
 | Uso de Redis y búsqueda vectorial | Pendientes de diseño e implementación |
 
@@ -143,7 +143,7 @@ npm run build
 npm start
 ```
 
-`npm start` sigue ejecutando el ejemplo aislado: valida el objeto definido en `src/validate-event.ts` y muestra `Evento valido` seguido de los datos. Para ejecutarlo durante el desarrollo: `npm run dev`. El consumo de SQS utiliza el programa independiente del siguiente paso.
+`npm start` sigue ejecutando el ejemplo aislado: valida el objeto definido en `src/validate-event.ts` y muestra `Evento valido` seguido de los datos. Para ejecutarlo durante el desarrollo: `npm run dev`. El consumo de SQS utiliza el programa independiente del paso 6.
 
 El contrato actual de `src/event-schema.ts` exige:
 
@@ -210,7 +210,7 @@ node dist/receive-event.js
 
 La compilación TypeScript también genera este archivo. El programa realiza una sola petición, espera hasta 20 segundos y recibe como máximo un mensaje. Tras interpretar el JSON y validarlo, guarda el evento y muestra `Evento elaborato` con MessageId, eventId y resultado `inserted` o `already_saved`. Después envía DeleteMessage con el ReceiptHandle de la recepción actual y muestra `Cancellazione confermata da SQS`. Distingue cuerpo ausente, JSON mal formado e incumplimiento del contrato. Si no recibe mensajes, muestra `Nessun messaggio disponibile`.
 
-Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza por los campos obligatorios ausentes y no lo elimina. Los fallos de persistencia o conflictos interrumpen el flujo antes de DeleteMessage. Si la eliminación falla después de guardar el evento, una entrega repetida puede reconocerse como `already_saved`. Puede recibirse un mensaje anterior; comparar los MessageId. Se ha verificado la recuperación tras una conexión PostgreSQL rechazada antes de guardar el evento. El traslado efectivo a la DLQ y los fallos posteriores a la persistencia siguen pendientes.
+Para comprobar la separación de responsabilidades, enviar `{}` al gateway: HTTP devuelve `202`, pero el consumidor lo rechaza por los campos obligatorios ausentes y no lo elimina. Los fallos de persistencia o conflictos interrumpen el flujo antes de DeleteMessage. Si la eliminación falla después de guardar el evento, una entrega repetida puede reconocerse como `already_saved`. Puede recibirse un mensaje anterior; comparar los MessageId. Se ha verificado la recuperación tras una conexión PostgreSQL rechazada antes de guardar el evento. También se ha verificado una nueva entrega tras una interrupción simulada entre el guardado y la eliminación. Quedan por probar el traslado efectivo a la DLQ y un fallo de la propia petición DeleteMessage.
 
 Para probar otro evento, usar `examples/events/telemetry-second.json` en la petición curl del paso 3. El consumidor devuelve `inserted` si el ID es nuevo o `already_saved` si ya está guardado el contenido idéntico; en ambos casos solicita la eliminación del mensaje.
 
@@ -237,6 +237,34 @@ Se han verificado un envío HTTP real a LocalStack, el rechazo de JSON mal forma
 
 Una prueba manual con `examples/events/telemetry-db-retry.json` verificó el fallo antes de guardar: al ejecutar el consumidor con `PGPORT=1`, se rechazó la conexión y no se creó la nueva fila. Después del tiempo de invisibilidad, otra ejecución con el puerto correcto recibió el mismo MessageId, insertó el evento y obtuvo la confirmación de eliminación. El segundo intento se inició manualmente, sin otro envío HTTP. El puerto erróneo solo afectaba a ese proceso; PostgreSQL no se detuvo. La prueba no cubre la pérdida de una respuesta de commit ni un fallo de DeleteMessage. El ejemplo ya se guardó en la prueba original: al reutilizarlo en la misma base de datos, la recuperación puede devolver `already_saved`.
 
+Una segunda prueba, con `examples/events/telemetry-before-delete.json`, interrumpió voluntariamente el programa **después de guardar y antes de DeleteMessage**. El primer intento devolvió `inserted` y después el error simulado; el evento ya estaba guardado. Al recibir de nuevo el mismo MessageId, una ejecución normal devolvió `already_saved` y obtuvo la confirmación de eliminación. Se verificó una sola fila en la base de datos. Este segundo intento también se inició manualmente.
+
+Para reproducir esta segunda prueba, con la infraestructura, la tabla y el gateway preparados, enviar **una sola vez** desde la raíz:
+
+```bash
+curl -i http://127.0.0.1:8080/events \
+  -H 'Content-Type: application/json' \
+  --data-binary @examples/events/telemetry-before-delete.json
+```
+
+Después, partiendo de la raíz en otra terminal, usar la compilación del paso 4:
+
+```bash
+cd services/semantic-worker
+set -a
+source .env.example
+set +a
+SIMULATE_FAILURE_BEFORE_DELETE=1 node dist/receive-event.js
+```
+
+La variable activa la simulación solo para ese proceso. El programa debe mostrar el resultado de persistencia y después el error simulado, sin confirmación de eliminación. Si el ID ya existe con contenido idéntico, el primer resultado será `already_saved` en lugar de `inserted`. Transcurridos al menos 30 segundos desde la recepción, sin repetir curl, ejecutar en la misma terminal:
+
+```bash
+node dist/receive-event.js
+```
+
+Comparar los MessageId: puede recibirse un mensaje anterior. La recuperación del mensaje de prueba debe producir `already_saved` y confirmación de eliminación. La simulación no ejecuta DeleteMessage en el primer intento: no prueba un fallo de red de esa petición ni la pérdida de una respuesta de commit. No demuestra procesamiento exactly-once para cualquier efecto de la aplicación.
+
 Los experimentos destacan tres diferencias:
 
 - Aceptar un mensaje y procesarlo son operaciones separadas.
@@ -254,9 +282,10 @@ services/semantic-worker/      Esquema, consumo SQS y módulos PostgreSQL
 
 ## Próximos pasos
 
-1. Verificar un fallo después de guardar y antes de eliminar el mensaje, seguido de una nueva entrega.
-2. Probar conflictos a través de SQS, concurrencia y traslado efectivo a la DLQ.
+1. Verificar el traslado efectivo a la DLQ.
+2. Automatizar las pruebas principales y verificar la concurrencia.
 3. Introducir consumo continuo y cierre controlado del worker.
-4. Añadir pruebas del worker y comprobaciones automáticas antes de la demostración completa.
+4. Probar conflictos a través de SQS y un fallo real de la petición DeleteMessage.
+5. Añadir comprobaciones automáticas y verificar el arranque desde un entorno limpio.
 
 Las credenciales y los puertos publicados por Compose están destinados al desarrollo local. La propuesta inicial de `green_scale_architecture.md` incluye funcionalidades futuras; este README describe lo que está implementado.
