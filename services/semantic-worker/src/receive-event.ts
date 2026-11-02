@@ -79,6 +79,12 @@ try {
             outcome,
         });
 
+        // Interruzione volontaria per verificare la riconsegna dopo il salvataggio.
+        // Attiva soltanto quando la variabile vale esattamente "1".
+        if (process.env.SIMULATE_FAILURE_BEFORE_DELETE === "1") {
+            throw new Error("Guasto simulato dopo il salvataggio e prima della cancellazione");
+        }
+
         // Qui la persistenza è confermata, ma la cancellazione non è ancora avvenuta.
         // Serve l'handle di questa ricezione, non il MessageId o l'eventId.
         if (!message.ReceiptHandle) {
